@@ -78,6 +78,46 @@ default — override with `--compromised-user`) amid normal background
 activity for four other users, so the triage output should flag exactly
 that one account.
 
+### One-shot demo: logs + Kibana dashboards
+
+```bash
+./demo/run_demo.sh
+```
+
+This brings up the full stack, ingests three bundled demo cases
+(`demo/sample_data/`, one planted compromised account each), and
+provisions a Kibana dashboard via `kibana/provision_dashboards.py`. When it
+finishes, open:
+
+```
+http://localhost:5601/app/dashboards#/view/solitude-m365-triage-overview
+```
+
+The dashboard has 7 panels:
+
+- **Sign-ins over time by risk level** — date histogram, split by Entra risk level
+- **Sign-ins by country** — spot geographic outliers
+- **Client app usage** — legacy/basic-auth clients vs modern auth
+- **Top users by sign-in volume**
+- **Audit log operations breakdown** — inbox rules, consent grants, etc.
+- **Risky / legacy-auth sign-ins** — saved search, pre-filtered
+- **Mail rule & app consent audit events** — saved search, pre-filtered
+
+Filter any panel to a single incident by typing `case_id: "SR-2026-0501"`
+(or whichever case) into the dashboard's search bar.
+
+To provision dashboards against a stack you've already loaded data into
+(skipping the ingestion step), run just the provisioning script:
+
+```bash
+pip install requests
+python kibana/provision_dashboards.py --kibana-url http://localhost:5601
+```
+
+It's idempotent — every object has a fixed id and is created with
+`overwrite=true`, so re-running it after re-ingesting data just refreshes
+the same dashboard rather than duplicating it.
+
 ### Run tests
 
 ```bash
@@ -107,6 +147,18 @@ Environment variables (prefix `APP_`), see `.env.example`:
 
 Rule thresholds (impossible-travel speed, legacy-auth client list, risky
 consent scopes) are configurable in `app/config.py`.
+
+## Repo layout
+
+```
+app/                  FastAPI service (routes, ES client, pure rule engine)
+scripts/              generate_sample_logs.py — synthetic M365 log generator
+tests/                unit tests for the rule engine (no ES required)
+kibana/               provision_dashboards.py — scripted Kibana dashboard setup
+demo/
+  sample_data/        bundled demo log fixtures (3 cases, committed to the repo)
+  run_demo.sh         one-shot: docker compose up, ingest demo data, provision dashboards
+```
 
 ## Known limitations
 
