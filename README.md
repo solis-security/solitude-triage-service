@@ -158,6 +158,9 @@ kibana/               provision_dashboards.py — scripted Kibana dashboard setu
 demo/
   sample_data/        bundled demo log fixtures (3 cases, committed to the repo)
   run_demo.sh         one-shot: docker compose up, ingest demo data, provision dashboards
+ai-analysis-mcp/      MCP server: AI-assisted analysis over findings, backed by a
+                      local Ollama model (evidence-grounded, with a rejection-rate
+                      circuit breaker) — see ai-analysis-mcp/README.md
 ```
 
 ## Known limitations
