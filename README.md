@@ -44,7 +44,7 @@ Log file (.jsonl) or JSON POST
 
 `app/rules.py` has no Elasticsearch dependency by design — it's pure
 functions over plain dicts, so the detection logic is fully unit-testable
-without a running cluster (see `tests/test_rules.py`, 19 tests).
+without a running cluster (see `tests/test_rules.py`).
 
 ## Running locally
 
