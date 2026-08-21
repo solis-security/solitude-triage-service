@@ -15,6 +15,7 @@ from collections import defaultdict
 from datetime import datetime, timezone
 
 from app.config import settings
+from app.sanitize import as_bool, safe_text
 
 # Rough centroid coordinates for a handful of countries, used only to
 # approximate travel distance for the impossible-travel heuristic. Not
@@ -29,7 +30,7 @@ COUNTRY_CENTROIDS: dict[str, tuple[float, float]] = {
 }
 
 
-def _parse_ts(value) -> datetime:
+def parse_timestamp(value) -> datetime:
     """Always returns a UTC-aware datetime.
 
     Exports mix offset-bearing and naive timestamps; returning both kinds made
@@ -84,13 +85,13 @@ def detect_impossible_travel(signins: list[dict]) -> list[dict]:
         # US -> (unknown) -> NG 25 minutes apart produced nothing at all.
         events = sorted(
             (e for e in events if e.get("location_country") in COUNTRY_CENTROIDS),
-            key=lambda e: _parse_ts(e["timestamp"]),
+            key=lambda e: parse_timestamp(e["timestamp"]),
         )
         for a, b in zip(events, events[1:]):
             if a["location_country"] == b["location_country"]:
                 continue
             ca, cb = a["location_country"], b["location_country"]
-            hours = abs((_parse_ts(b["timestamp"]) - _parse_ts(a["timestamp"])).total_seconds()) / 3600
+            hours = abs((parse_timestamp(b["timestamp"]) - parse_timestamp(a["timestamp"])).total_seconds()) / 3600
             if hours == 0:
                 hours = 0.01
             distance = _haversine_km(COUNTRY_CENTROIDS[ca], COUNTRY_CENTROIDS[cb])
@@ -221,7 +222,7 @@ def detect_suspicious_mail_rules(audit_records: list[dict], tenant_domains: list
             for key in ("ForwardTo", "RedirectTo", "ForwardAsAttachmentTo")
             if params.get(key)
         ]
-        delete_message = bool(params.get("DeleteMessage"))
+        delete_message = as_bool(params.get("DeleteMessage"))
 
         if forward_values:
             # Any external recipient makes the whole rule external — a rule
@@ -234,7 +235,9 @@ def detect_suspicious_mail_rules(audit_records: list[dict], tenant_domains: list
                 "area": "Mail rules and forwarding",
                 "text": (
                     f"{r['user_principal_name']}: {r['operation']} forwards/redirects mail to "
-                    f"{forward_to}" + (" (external domain)" if external else "") + "."
+                    # Recipient strings are chosen by whoever created the rule
+                    # and end up in both the prompt and the analyst's report.
+                    f"{safe_text(forward_to, 120)}" + (" (external domain)" if external else "") + "."
                 ),
                 "evidence": [r["_id"]],
                 "subject": r["user_principal_name"],
@@ -261,7 +264,7 @@ def detect_risky_app_consent(audit_records: list[dict]) -> list[dict]:
             continue
         params = r.get("parameters", {}) or {}
         scopes = params.get("scopes", []) or params.get("Scope", "").split()
-        is_admin_consent = bool(params.get("IsAdminConsent", False))
+        is_admin_consent = as_bool(params.get("IsAdminConsent", False))
         risky = [s for s in scopes if s in settings.risky_consent_scopes]
         if risky and not is_admin_consent:
             findings.append({
@@ -270,7 +273,8 @@ def detect_risky_app_consent(audit_records: list[dict]) -> list[dict]:
                 "area": "Applications and access",
                 "text": (
                     f"{r['user_principal_name']}: granted non-admin consent to application "
-                    f"'{params.get('AppDisplayName', params.get('ClientAppId', 'unknown'))}' "
+                    # Attacker-choosable: registering an app means naming it.
+                    f"'{safe_text(params.get('AppDisplayName', params.get('ClientAppId', 'unknown')))}' "
                     f"with high-impact scope(s): {', '.join(risky)}."
                 ),
                 "evidence": [r["_id"]],

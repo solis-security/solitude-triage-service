@@ -6,3 +6,9 @@ __pycache__/
 .venv-demo
 .env
 *.egg-info/
+
+# Organisation CA certificates. Also ignored on the branch that adds the
+# certs/ build mechanism; duplicated here so an accidental `git add -A`
+# cannot commit one before those branches meet.
+certs/*.crt
+certs/*.pem
