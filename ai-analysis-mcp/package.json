@@ -1,0 +1,26 @@
+{
+  "name": "solitude-ai-analysis-mcp",
+  "version": "0.2.0",
+  "description": "MCP server: evidence-grounded AI analysis of BEC investigation findings, backed by a local Ollama model",
+  "type": "module",
+  "bin": {
+    "solitude-ai-analysis-mcp": "dist/server.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "test": "tsc && tsc -p tsconfig.test.json && node --test test/*.test.ts",
+    "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json"
+  },
+  "engines": {
+    "node": ">=22.18"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0"
+  }
+}

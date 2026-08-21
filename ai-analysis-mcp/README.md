@@ -1,99 +1,129 @@
 # Solitude AI Analysis MCP Server
 
-An MCP (Model Context Protocol) server implementing the **AI-Assisted
-Analysis Engine** from the Solitude Reloaded TDD (Section 4.4), backed by a
-**local Ollama model** instead of a hosted API — so investigation content
-never has to leave your machine/network to get an AI-assisted read on it.
+An MCP server implementing the **AI-Assisted Analysis Engine** from the
+Solitude Reloaded TDD (Section 4.4), backed by a **local Ollama model**
+rather than a hosted API — so investigation content never leaves the
+machine to get an AI-assisted read on it.
 
-## Design: evidence grounding is enforced, not requested
+TypeScript, matching the convention used by the other Solis MCP servers.
+
+## Design: grounding is enforced, and a failed conclusion is withheld
 
 Every analysis tool follows the same shape:
 
 1. The model is given a finding (or case, or email) **plus the specific
-   evidence records** that exist for it, and instructed to cite only
-   those evidence ids.
-2. The response is parsed and checked in code — not just trusted:
-   - No evidence cited but a firm conclusion drawn → **rejected** (`rejected_no_evidence`)
-   - An evidence id cited that wasn't in the input → **rejected** (`rejected_ungrounded`, i.e. hallucination)
-   - Model honestly says the evidence doesn't support a conclusion → **accepted** (`grounded`, `insufficient_evidence: true`)
-3. Every call is appended to an audit log (model, digest, validation result,
-   evidence refs) — this is what `get_ai_engine_health` reads to compute a
-   rejection-rate circuit breaker, matching the TDD's requirement that
-   auto-inclusion of AI findings in a report should stop if the AI engine
-   starts misbehaving.
+   evidence records that exist for it**, and instructed to cite only those ids.
+2. The response is parsed with `safeParse` — model output is untrusted input,
+   so an unexpected value degrades to `engine_error` rather than throwing out
+   of the tool call.
+3. The result is checked in code, not trusted:
+   - Firm conclusion citing nothing → **rejected** (`rejected_no_evidence`)
+   - An id that was never supplied → **rejected** (`rejected_ungrounded`)
+   - Honest "the evidence doesn't support this" → **accepted** (`grounded`,
+     `insufficient_evidence: true`)
+4. **A rejected conclusion is withheld, not annotated.** The narrative and
+   confidence are replaced before returning; the original text goes to the
+   audit log only. Clearing `evidence_refs` while still returning the model's
+   prose meant a hallucination reached anything that rendered `narrative`
+   without also checking `validation`.
+5. Every call is appended to an audit log recording the model, digest, the ids
+   the model was **offered**, the ids it **cited**, and the verdict — enough to
+   re-check any decision after the fact.
+6. `get_ai_engine_health` reads that log for a rejection-rate circuit breaker.
+   While it is tripped, AI findings must not be auto-included in reports.
 
-This validation logic lives in `app/validation.py`, has no Ollama or MCP
-dependency, and is fully unit tested.
+`src/validation.ts` holds this logic with no Ollama, MCP or filesystem
+dependency, and is unit tested in isolation.
 
-## Tools exposed
+### Content analysis is validated too
+
+`analyze_email_content` was previously exempt from all of the above. It now has
+a grounding notion of its own, checkable without a second model: flags must come
+from the controlled vocabulary, and the claimed method must match the input the
+model was actually given. A model reporting `content_analysis` when no body was
+supplied is describing an analysis it could not have performed.
+
+## Tools
 
 | Tool | Purpose |
 |---|---|
-| `analyze_finding` | Evidence-grounded analysis of a single investigation finding |
-| `summarize_case` | Evidence-grounded executive summary across all findings in a case |
-| `analyze_email_content` | Data-exposure/sensitivity analysis of an email; falls back to subject-line-only analysis (explicitly flagged) when no body is available |
-| `get_ai_engine_health` | Ollama reachability, available models, and circuit-breaker status |
+| `analyze_finding` | Evidence-grounded analysis of one investigation finding |
+| `summarize_case` | Evidence-grounded executive summary across a case |
+| `analyze_email_content` | Data-exposure assessment of a message; falls back to subject-line-only, explicitly flagged |
+| `get_ai_engine_health` | Ollama reachability, local models, circuit-breaker status |
 
 ## Setup
 
-Requires [Ollama](https://ollama.com) running locally with a model pulled:
+Requires [Ollama](https://ollama.com) with a model pulled:
 
 ```bash
 ollama pull llama3.1
-ollama serve   # if not already running as a service
+ollama serve
 ```
 
 ```bash
-pip install -r requirements.txt
-cp .env.example .env   # adjust AI_OLLAMA_MODEL etc. if needed
-```
-
-Run standalone (stdio transport) to sanity-check it starts:
-
-```bash
-python -m app.server
+npm install
+npm run build
 ```
 
 ### Connect it to Claude Desktop or Claude Code
-
-Add to your MCP client config (e.g. `claude_desktop_config.json`):
 
 ```json
 {
   "mcpServers": {
     "solitude-ai-analysis": {
-      "command": "python",
-      "args": ["-m", "app.server"],
-      "cwd": "/path/to/solitude-ai-analysis-mcp",
+      "command": "node",
+      "args": ["/path/to/solitude-triage-service/ai-analysis-mcp/dist/server.js"],
       "env": { "AI_OLLAMA_MODEL": "llama3.1" }
     }
   }
 }
 ```
 
-## Running tests
+## Tests
 
 ```bash
-pip install -r requirements-dev.txt
-pytest tests/ -v
+npm test    # builds, then runs the suite
 ```
 
-20 tests, all runnable without a real Ollama installation:
+The suite is runnable with no Ollama installed. `test/mockOllama.ts` emulates
+`/api/chat` and `/api/tags` closely enough to exercise the real request path.
+Covered: happy path, hallucinated id, no-evidence-cited, honest insufficiency,
+malformed output, out-of-vocabulary enum values, unreachable Ollama, withheld
+narrative, audit contents, and the content-analysis grounding rules.
 
-- `tests/test_validation.py` — pure logic: grounding checks, circuit breaker math
-- `tests/test_analysis_integration.py` — full pipeline (prompts → Ollama → parsing → validation → audit log), run against `tests/mock_ollama.py`, a ~100-line mock HTTP server that emulates Ollama's `/api/chat` and `/api/tags` endpoints closely enough for the real `ollama` Python client to talk to it. Scenarios covered: happy path, hallucinated evidence id, no-evidence-cited, honest "insufficient evidence", malformed model output, and Ollama being unreachable — each checked against the real request/response path, not just mocked-out function calls.
+### Checking against a real model
+
+The suite runs entirely against the mock, so it cannot tell you how a real
+model behaves. `scripts/live-check.ts` exercises all four tools against a live
+Ollama:
+
+```bash
+npx tsc scripts/live-check.ts --outDir dist-scripts --target ES2023 \
+  --module NodeNext --moduleResolution NodeNext --skipLibCheck
+node dist-scripts/live-check.js
+```
+
+Two things this caught that the mock could not, both now fixed:
+
+- **The model cites finding ids.** `summarize_case` is handed whole findings, so
+  `llama3.1` cited `F-1006` alongside the correct evidence ids — and a strict
+  evidence-id subset rule rejected an otherwise correct summary. Finding ids are
+  now citable; invented ids are still rejected.
+- **The model ignored a supplied body**, claiming `subject_line_fallback` when a
+  body was present. The content grounding rule caught it; the prompt now states
+  the requirement explicitly.
+
+Verified against `llama3.1` (digest `46e0c10c039e`): all four tools grounded,
+breaker clean.
 
 ## Known limitations
 
-- **Not verified against a real Ollama instance.** This was built and
-  tested in a sandbox with no Ollama installed — the mock server captures
-  Ollama's documented response shape, but subtle real-world differences
-  (exact error formats, timeout behavior, model-specific JSON-mode quirks)
-  haven't been exercised. Run the tools once against your real Ollama
-  setup and report anything that doesn't match.
-- `analyze_email_content`'s sensitivity vocabulary is a fixed list in the
-  prompt (`app/prompts.py`) — extend it there if you need more categories.
-- The audit log is a local JSONL file, not a database — fine for a single
-  analyst's machine, not for concurrent/shared use.
-- No content is sent anywhere except your local Ollama instance — there's
-  no telemetry or external call in this server.
+- The audit log is a JSONL file, fine for a single analyst's machine, not for
+  concurrent or shared use.
+- The sensitivity vocabulary is fixed in `src/validation.ts` and mirrored into
+  the prompt; extend both together.
+- Nothing wires the triage service to this server yet — findings are passed as
+  tool arguments, and `EvidenceItem` needs `{id, source, summary}` while
+  findings carry only raw Elasticsearch document ids.
+- No content leaves the machine except to your local Ollama instance.
