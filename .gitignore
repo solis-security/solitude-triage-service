@@ -6,3 +6,7 @@ __pycache__/
 .venv-demo
 .env
 *.egg-info/
+
+# Organisation CA certificates for the image build — never commit these.
+certs/*.crt
+certs/*.pem

@@ -19,6 +19,11 @@ import requests
 
 HEADERS = {"kbn-xsrf": "true", "Content-Type": "application/json"}
 
+# Wide enough that committed demo fixtures stay visible as they age. Override
+# with --time-from if you are pointing this at live data and want a tighter
+# default window.
+DEFAULT_TIME_FROM = "now-1y"
+
 
 def put_data_view(base: str, auth, id_: str, title: str, name: str) -> str:
     """Create/update a Data View and return its id."""
@@ -132,6 +137,8 @@ def main():
     ap.add_argument("--kibana-url", default="http://localhost:5601")
     ap.add_argument("--username", default=None)
     ap.add_argument("--password", default=None)
+    ap.add_argument("--time-from", default=DEFAULT_TIME_FROM,
+                    help=f"Dashboard default time range start (default: {DEFAULT_TIME_FROM})")
     args = ap.parse_args()
 
     auth = (args.username, args.password) if args.username else None
@@ -195,7 +202,14 @@ def main():
         "description": "Sign-in and audit log overview across ingested triage cases. Filter by case_id in the search bar to focus on a single incident.",
         "panelsJSON": json.dumps(panels),
         "optionsJSON": json.dumps({"useMargins": True, "hidePanelTitles": False}),
-        "timeRestore": False,
+        # The dashboard carries its own time range. Without this it inherits
+        # Kibana's default (last 15 minutes), and the bundled demo fixtures
+        # are committed with fixed timestamps -- so opening the dashboard at
+        # the documented URL showed an empty dashboard on every panel, and got
+        # worse the longer the fixtures sat in the repo.
+        "timeRestore": True,
+        "timeFrom": args.time_from,
+        "timeTo": "now",
         "kibanaSavedObjectMeta": {
             "searchSourceJSON": json.dumps({"query": {"query": "", "language": "kuery"}, "filter": []})
         },
