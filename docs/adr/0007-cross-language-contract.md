@@ -2,15 +2,14 @@
 
 - Status: Proposed
 - Date: 2026-09-02
-- Related: ADR 0003; TDD §4.4, §5
+- Related: ADR 0003, ADR 0009; TDD §4.4, §5
 
 ## Context
 
-ADR 0003 keeps the analysis engine in TypeScript and the detection service in
-Python. That is a defensible seam — detection is data processing over
-Elasticsearch, analysis is LLM orchestration — but it creates a contract across a
-language boundary, and that contract is currently maintained by hand and by
-comment.
+The platform is Python throughout (ADR 0008), and ADR 0009 keeps the analysis
+engine in TypeScript for now. That leaves exactly one cross-language boundary in
+the system — and this ADR exists solely because of it. The contract across that
+boundary is currently maintained by hand and by comment.
 
 `app/models.py`:
 
@@ -55,9 +54,10 @@ not the service contract, and stay hand-written and strict where they are.
 
 ## Rejected alternatives
 
-**Collapse to one language.** Either direction discards working, well-tested code.
-Rewriting the engine in Python would throw away the grounding and validation work
-that mitigates the TDD's highest-rated risk.
+**Collapse to one language.** Not rejected so much as deferred, and owned by
+ADR 0009 rather than by this one. If the engine is ported to Python later, this
+ADR shrinks to almost nothing — which is the correct outcome, not an argument
+against doing it now.
 
 **Keep hand-maintained mirrors.** The current state. It has not broken yet because
 one person wrote both sides within a short window; it will not survive a second

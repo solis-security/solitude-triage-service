@@ -64,8 +64,8 @@ close or archive completed cases.
 - Authentication is a prerequisite for anything holding real customer M365 data.
   Until it exists, this service must not be deployed anywhere reachable, and must
   not be pointed at a real tenant's logs.
-- Where authentication lives is settled by ADR 0008: Better Auth in the
-  TypeScript Orchestration API, with this service verifying JWTs at its edge.
+- Where authentication lives is settled by ADR 0008: Entra ID is the identity
+  provider, with every service verifying tokens against JWKS at its own edge.
   Layer 1 does not depend on that and must not wait for it — a wildcard `case_id`
   is an input-validation bug, and would still be one behind a login.
 

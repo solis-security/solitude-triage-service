@@ -2,7 +2,7 @@
 
 - Status: Proposed
 - Date: 2026-09-02
-- Related: TDD §3.1, §4.4, §4.8; FR-03, FR-06, FR-09
+- Related: ADR 0007, ADR 0009; TDD §3.1, §4.4, §4.8; FR-03, FR-06, FR-09
 
 ## Context
 
@@ -33,7 +33,9 @@ Treat the analysis capability as a **library** with two thin adapters over the
 same core:
 
 1. **HTTP service adapter** — what the Orchestration API calls in the pipeline.
-   This is the primary path and the one the TDD's architecture requires.
+   This is the primary path and the one the TDD's architecture requires. The
+   Orchestration API is Python (ADR 0008), so this adapter is also what makes the
+   engine's implementation language a private detail of the engine.
 2. **MCP adapter** — retained, unchanged in spirit, for analyst and operator use.
 
 Neither adapter contains logic. Grounding validation, the circuit breaker and the
@@ -59,8 +61,8 @@ that would be rejected over HTTP is rejected over MCP.
 and forces the Orchestration API into subprocess management for what should be a
 request.
 
-**Rewrite the engine in Python to match the service.** Would discard the grounding
-and validation work, which is the direct mitigation for the TDD's highest-rated
-risk (§12, AI hallucination, High). The seam between "data processing over
-Elasticsearch" and "LLM orchestration" is a real one; see ADR 0007 for how the
-contract across it is kept honest.
+**Rewrite the engine in Python to match the rest of the platform.** A live
+question now that the platform is Python throughout, and one this ADR deliberately
+does not answer: it is about the engine's *interface*, which is the same either
+way. ADR 0009 owns the language question; ADR 0007 owns keeping the contract
+across the boundary honest while it remains.

@@ -8,6 +8,11 @@ diverged.
 Decisions live in [`docs/adr/`](adr/). Each is `Proposed` until Engineering signs
 off.
 
+Two platform facts are settled and shape most of what follows: the platform is
+**Python/FastAPI** throughout, including the Orchestration API, and **Entra ID**
+is the identity provider for staff. The analysis engine is the one TypeScript
+component, deliberately and with a trigger to revisit (ADR 0009).
+
 ## Where the code stands against the TDD
 
 Assessed against `main` **plus the four open PRs (#1–#4)**, since those carry the
@@ -34,7 +39,7 @@ Non-functional posture: **§9 tenant isolation is currently violated** by a
 demonstrated cross-case leak (ADR 0006). §8/§9 chain of custody is unmet
 (ADR 0004). There is no authentication on any endpoint.
 
-## The eight decisions
+## The nine decisions
 
 1. **[0001](adr/0001-core-not-a-phase-2-module.md)** — this repo is the platform
    core; triage is a scope profile, not a separate system.
@@ -50,8 +55,10 @@ demonstrated cross-case leak (ADR 0006). §8/§9 chain of custody is unmet
    enforced at a trust boundary, not by string interpolation.
 7. **[0007](adr/0007-cross-language-contract.md)** — the Python/TypeScript
    contract is generated, not hand-maintained.
-8. **[0008](adr/0008-authentication-better-auth.md)** — Better Auth owns staff
-   authentication in the TypeScript layer; this service verifies JWTs via JWKS.
+8. **[0008](adr/0008-authentication-entra-id.md)** — Entra ID is the identity
+   provider; every service verifies tokens against JWKS at its own edge.
+9. **[0009](adr/0009-analysis-engine-language.md)** — the analysis engine stays
+   TypeScript for now, with a named trigger to revisit.
 
 ## Why this order
 
@@ -74,15 +81,17 @@ highest-rated risk. 0007 is build hygiene and can land whenever.
 
 ADR 0008 tracks whenever the Orchestration API is stood up — there is no token
 issuer before then. It is deliberately not a prerequisite for 0006 layer 1.
+ADR 0009 is a deferral with a trigger rather than a change to make now; it should
+be re-read when the Orchestration API work starts.
 
 ## Open questions for Engineering
 
 - **Does Phase 1 build here or greenfield?** ADR 0001 assumes here. If not, the
   §12 divergence risk needs an explicit owner and a plan for keeping two rule
   engines in agreement.
-- **Is the Orchestration API TypeScript?** ADR 0008 assumes so and picks Better
-  Auth accordingly. If it is not, that ADR is void, though its JWKS verification
-  seam survives any OIDC-shaped issuer.
+- **Are the staff-auth and customer-consent app registrations kept separate?**
+  Both are Entra now (ADR 0008, TDD §4.1), which makes conflating them easier and
+  worse. This needs to be explicit in the app-registration setup and reviewed.
 - **What is the case store?** ADR 0005 requires durable per-finding state.
   The TDD's §5 data model implies one; nothing here implements it.
 - **The RD is authoritative for acceptance criteria (TDD §1.3) and we do not have
