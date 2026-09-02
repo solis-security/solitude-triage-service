@@ -3,6 +3,7 @@ from __future__ import annotations
 from elasticsearch import Elasticsearch
 from elasticsearch.helpers import bulk
 
+from app.case_id import require_case_id
 from app.config import settings
 
 SIGNIN_MAPPING = {
@@ -47,16 +48,16 @@ def get_client() -> Elasticsearch:
 
 
 def signin_index(case_id: str) -> str:
-    return f"{settings.signin_index_prefix}-{case_id}".lower()
+    return f"{settings.signin_index_prefix}-{require_case_id(case_id)}".lower()
 
 
 def audit_index(case_id: str) -> str:
-    return f"{settings.audit_index_prefix}-{case_id}".lower()
+    return f"{settings.audit_index_prefix}-{require_case_id(case_id)}".lower()
 
 
 def ensure_index(index: str, mapping: dict) -> None:
     client = get_client()
-    if not client.indices.exists(index=index):
+    if not client.indices.exists(index=index, expand_wildcards="none"):
         client.indices.create(index=index, mappings=mapping)
 
 
@@ -72,10 +73,12 @@ def search_all(index: str, query: dict | None = None, size: int = 1000) -> list[
     """Fetch up to `size` documents from an index, returning _source with the
     document id attached as `_id`."""
     client = get_client()
-    if not client.indices.exists(index=index):
+    if not client.indices.exists(index=index, expand_wildcards="none"):
         return []
     body = query or {"match_all": {}}
-    resp = client.search(index=index, query=body, size=size)
+    # expand_wildcards="none" so a name that somehow still contains a wildcard
+    # resolves to nothing rather than to every case index in the cluster.
+    resp = client.search(index=index, query=body, size=size, expand_wildcards="none")
     results = []
     for hit in resp["hits"]["hits"]:
         doc = hit["_source"]

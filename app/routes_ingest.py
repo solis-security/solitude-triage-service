@@ -4,6 +4,7 @@ import json
 
 from fastapi import APIRouter, HTTPException, UploadFile
 
+from app.case_id import CaseId
 from app.es_client import AUDIT_MAPPING, SIGNIN_MAPPING, audit_index, bulk_index, ensure_index, signin_index
 from app.models import AuditLogRecord, IngestResult, SignInLog
 
@@ -22,7 +23,7 @@ def _prepare_docs(records: list[dict], case_id: str) -> list[dict]:
 
 
 @router.post("/{case_id}/signin", response_model=IngestResult)
-def ingest_signin_logs(case_id: str, records: list[SignInLog]):
+def ingest_signin_logs(case_id: CaseId, records: list[SignInLog]):
     index = signin_index(case_id)
     ensure_index(index, SIGNIN_MAPPING)
     docs = _prepare_docs([r.model_dump() for r in records], case_id)
@@ -31,7 +32,7 @@ def ingest_signin_logs(case_id: str, records: list[SignInLog]):
 
 
 @router.post("/{case_id}/audit", response_model=IngestResult)
-def ingest_audit_logs(case_id: str, records: list[AuditLogRecord]):
+def ingest_audit_logs(case_id: CaseId, records: list[AuditLogRecord]):
     index = audit_index(case_id)
     ensure_index(index, AUDIT_MAPPING)
     docs = _prepare_docs([r.model_dump() for r in records], case_id)
@@ -40,7 +41,7 @@ def ingest_audit_logs(case_id: str, records: list[AuditLogRecord]):
 
 
 @router.post("/{case_id}/file", response_model=IngestResult)
-async def ingest_log_file(case_id: str, log_type: str, file: UploadFile):
+async def ingest_log_file(case_id: CaseId, log_type: str, file: UploadFile):
     """Ingest a newline-delimited JSON (.jsonl) file of sign-in or audit
     records — the format produced by scripts/generate_sample_logs.py."""
     if log_type not in ("signin", "audit"):

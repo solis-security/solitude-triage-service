@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Query
 
+from app.case_id import CaseId
 from app.es_client import audit_index, search_all, signin_index
 from app.models import Finding, TriageAnswer, TriageReport
 from app.rules import run_all_rules, summarize_triage
@@ -14,7 +15,7 @@ router = APIRouter(prefix="/triage", tags=["triage"])
 
 @router.get("/{case_id}", response_model=TriageReport)
 def get_triage_report(
-    case_id: str,
+    case_id: CaseId,
     tenant_domain: str | None = Query(None, description="Tenant's primary mail domain(s), comma-separated"),
 ):
     signins = search_all(signin_index(case_id))
@@ -57,5 +58,5 @@ def get_triage_report(
 
 
 @router.get("/{case_id}/findings", response_model=list[Finding])
-def get_findings(case_id: str, tenant_domain: str | None = Query(None)):
+def get_findings(case_id: CaseId, tenant_domain: str | None = Query(None)):
     return get_triage_report(case_id, tenant_domain).findings
