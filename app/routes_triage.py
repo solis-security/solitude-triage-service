@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Query
 
+from app.case_id import CaseId
 from app.es_client import MAX_TRIAGE_DOCS, audit_index, scan_all, signin_index
 from app.evidence import build_evidence_index, hydrate_findings
 from app.models import AnalysisInput, Finding, FindingAnalysisInput, TriageAnswer, TriageReport
@@ -20,7 +21,7 @@ router = APIRouter(prefix="/triage", tags=["triage"])
 
 @router.get("/{case_id}", response_model=TriageReport)
 def get_triage_report(
-    case_id: str,
+    case_id: CaseId,
     tenant_domain: str | None = Query(None, description="Tenant's primary mail domain(s), comma-separated"),
 ):
     signins, signins_truncated = scan_all(signin_index(case_id))
@@ -79,13 +80,13 @@ def get_triage_report(
 
 
 @router.get("/{case_id}/findings", response_model=list[Finding])
-def get_findings(case_id: str, tenant_domain: str | None = Query(None)):
+def get_findings(case_id: CaseId, tenant_domain: str | None = Query(None)):
     return get_triage_report(case_id, tenant_domain).findings
 
 
 @router.get("/{case_id}/analysis-input", response_model=AnalysisInput)
 def get_analysis_input(
-    case_id: str,
+    case_id: CaseId,
     tenant_domain: str | None = Query(None, description="Tenant's primary mail domain(s), comma-separated"),
     limit: int = Query(200, ge=1, le=MAX_FINDINGS_TOTAL,
                        description="Maximum findings returned; the rest are reported in limitations"),

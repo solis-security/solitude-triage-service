@@ -3,6 +3,7 @@ from __future__ import annotations
 from elasticsearch import Elasticsearch
 from elasticsearch.helpers import bulk, scan
 
+from app.case_id import require_case_id
 from app.config import settings
 
 # Ceiling on how many documents a single triage will pull per log type.
@@ -52,16 +53,16 @@ def get_client() -> Elasticsearch:
 
 
 def signin_index(case_id: str) -> str:
-    return f"{settings.signin_index_prefix}-{case_id}".lower()
+    return f"{settings.signin_index_prefix}-{require_case_id(case_id)}".lower()
 
 
 def audit_index(case_id: str) -> str:
-    return f"{settings.audit_index_prefix}-{case_id}".lower()
+    return f"{settings.audit_index_prefix}-{require_case_id(case_id)}".lower()
 
 
 def ensure_index(index: str, mapping: dict) -> None:
     client = get_client()
-    if not client.indices.exists(index=index):
+    if not client.indices.exists(index=index, expand_wildcards="none"):
         client.indices.create(index=index, mappings=mapping)
 
 
@@ -97,12 +98,12 @@ def search_all_paged(
     paged: bool = False,
 ) -> tuple[list[dict], bool]:
     client = get_client()
-    if not client.indices.exists(index=index):
+    if not client.indices.exists(index=index, expand_wildcards="none"):
         return [], False
     body = query or {"match_all": {}}
 
     if not paged:
-        resp = client.search(index=index, query=body, size=max_docs)
+        resp = client.search(index=index, query=body, size=max_docs, expand_wildcards="none")
         hits = resp["hits"]["hits"]
         total = resp["hits"]["total"]["value"] if isinstance(resp["hits"]["total"], dict) else len(hits)
         results = []
@@ -128,6 +129,8 @@ def search_all_paged(
         index=index,
         query={"query": body, "sort": [{"timestamp": "asc"}]},
         preserve_order=True,
+        # A wildcard must never widen a scroll across other cases either.
+        expand_wildcards="none",
     ):
         if len(results) >= max_docs:
             truncated = True
