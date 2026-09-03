@@ -1,13 +1,18 @@
 from __future__ import annotations
 
-import uuid
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Query
 
-from app.es_client import audit_index, search_all, signin_index
+from app.es_client import MAX_TRIAGE_DOCS, audit_index, scan_all, signin_index
 from app.models import Finding, TriageAnswer, TriageReport
-from app.rules import run_all_rules, summarize_triage
+from app.rules import (
+    MAX_FINDINGS_PER_RULE_SUBJECT,
+    MAX_FINDINGS_TOTAL,
+    cap_findings,
+    run_all_rules,
+    summarize_triage,
+)
 
 router = APIRouter(prefix="/triage", tags=["triage"])
 
@@ -17,19 +22,21 @@ def get_triage_report(
     case_id: str,
     tenant_domain: str | None = Query(None, description="Tenant's primary mail domain(s), comma-separated"),
 ):
-    signins = search_all(signin_index(case_id))
-    audit_records = search_all(audit_index(case_id))
+    signins, signins_truncated = scan_all(signin_index(case_id))
+    audit_records, audit_truncated = scan_all(audit_index(case_id))
 
     tenant_domains = [d.strip() for d in tenant_domain.split(",")] if tenant_domain else None
-    raw_findings = run_all_rules(signins, audit_records, tenant_domains)
+    raw_findings, dropped_findings = cap_findings(
+        run_all_rules(signins, audit_records, tenant_domains)
+    )
 
     findings = [
         Finding(
-            id=f"F-{uuid.uuid5(uuid.NAMESPACE_URL, str(i) + str(f['evidence'])).hex[:8]}",
+            id=f["id"],
             rule=f["rule"], severity=f["severity"], area=f["area"], text=f["text"],
             evidence=f["evidence"], subject=f.get("subject"),
         )
-        for i, f in enumerate(raw_findings)
+        for f in raw_findings
     ]
 
     summary = summarize_triage(raw_findings)
@@ -43,6 +50,20 @@ def get_triage_report(
         limitations.append(
             "No tenant domain was supplied — external-forwarding detection could not confirm which "
             "destination domains are external to the tenant."
+        )
+    if dropped_findings:
+        limitations.append(
+            f"{dropped_findings:,} finding(s) were omitted to bound this report's size: at most "
+            f"{MAX_FINDINGS_PER_RULE_SUBJECT} per rule per account, and {MAX_FINDINGS_TOTAL:,} in "
+            "total. The accounts and rules involved are still represented."
+        )
+    if signins_truncated or audit_truncated:
+        which = " and ".join(
+            n for n, t in (("sign-in", signins_truncated), ("audit", audit_truncated)) if t
+        )
+        limitations.append(
+            f"Only the earliest {MAX_TRIAGE_DOCS:,} {which} records by timestamp were analysed — "
+            "this case exceeds the per-triage document ceiling, so findings may be incomplete."
         )
 
     return TriageReport(

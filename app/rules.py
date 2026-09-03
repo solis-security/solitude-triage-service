@@ -9,9 +9,10 @@ unit tested with synthetic data and no running cluster.
 from __future__ import annotations
 
 import math
+import re
+import uuid
 from collections import defaultdict
-from datetime import datetime
-from itertools import combinations
+from datetime import datetime, timezone
 
 from app.config import settings
 
@@ -29,9 +30,28 @@ COUNTRY_CENTROIDS: dict[str, tuple[float, float]] = {
 
 
 def _parse_ts(value) -> datetime:
+    """Always returns a UTC-aware datetime.
+
+    Exports mix offset-bearing and naive timestamps; returning both kinds made
+    any comparison between two records raise TypeError and fail the whole
+    triage request. Naive values are assumed UTC, which is what M365 exports.
+    """
     if isinstance(value, datetime):
-        return value
-    return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        dt = value
+    else:
+        dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def finding_id(rule: str, evidence: list[str]) -> str:
+    """Stable id derived only from the rule and its evidence, so the same
+    finding keeps the same id across runs and is safe to cite from a report
+    or a ticket. Deriving it from the finding's position in a list meant ids
+    shifted whenever unrelated rule output changed."""
+    key = f"{rule}|{','.join(sorted(evidence))}"
+    return f"F-{uuid.uuid5(uuid.NAMESPACE_URL, key).hex[:8]}"
 
 
 def _haversine_km(a: tuple[float, float], b: tuple[float, float]) -> float:
@@ -42,8 +62,14 @@ def _haversine_km(a: tuple[float, float], b: tuple[float, float]) -> float:
 
 
 def detect_impossible_travel(signins: list[dict]) -> list[dict]:
-    """Flag pairs of successful sign-ins, same user, different countries,
-    where the implied travel speed exceeds a realistic threshold."""
+    """Flag consecutive successful sign-ins, same user, different countries,
+    where the implied travel speed exceeds a realistic threshold.
+
+    Only adjacent sign-ins are compared. Comparing every pair made a single
+    incident fan out combinatorially — ten sign-ins alternating between two
+    countries produced twenty-five findings for what an analyst reads as one
+    event — and made the rule O(n^2) in a user's sign-in count.
+    """
     findings = []
     by_user: dict[str, list[dict]] = defaultdict(list)
     for s in signins:
@@ -51,13 +77,19 @@ def detect_impossible_travel(signins: list[dict]) -> list[dict]:
             by_user[s["user_principal_name"]].append(s)
 
     for user, events in by_user.items():
-        events = sorted(events, key=lambda e: _parse_ts(e["timestamp"]))
-        for a, b in combinations(events, 2):
+        # Drop sign-ins we cannot place before pairing, rather than letting
+        # them sit in the chain. A country outside COUNTRY_CENTROIDS is
+        # unusable for distance, and leaving it between two known sign-ins
+        # broke the adjacent pair and silently suppressed the detection —
+        # US -> (unknown) -> NG 25 minutes apart produced nothing at all.
+        events = sorted(
+            (e for e in events if e.get("location_country") in COUNTRY_CENTROIDS),
+            key=lambda e: _parse_ts(e["timestamp"]),
+        )
+        for a, b in zip(events, events[1:]):
             if a["location_country"] == b["location_country"]:
                 continue
             ca, cb = a["location_country"], b["location_country"]
-            if ca not in COUNTRY_CENTROIDS or cb not in COUNTRY_CENTROIDS:
-                continue
             hours = abs((_parse_ts(b["timestamp"]) - _parse_ts(a["timestamp"])).total_seconds()) / 3600
             if hours == 0:
                 hours = 0.01
@@ -120,6 +152,54 @@ def detect_legacy_auth(signins: list[dict]) -> list[dict]:
 
 _INBOX_RULE_OPS = {"New-InboxRule", "Set-InboxRule", "New-TransportRule", "Set-TransportRule"}
 
+# Matches an address anywhere inside a recipient string, whatever wrapping
+# Exchange put around it. A structured parse is not reliable here: for a
+# trailing separator ("a@b;") and for Exchange's bracketed form
+# ('"Name" [SMTP:a@b]'), email.utils.getaddresses returns [('', '')] — no
+# address at all — which scored real exfil as internal.
+_ADDRESS = re.compile(r"[A-Z0-9._%+\-]+@([A-Z0-9\-]+(?:\.[A-Z0-9\-]+)+)", re.I)
+
+
+def recipient_domains(value) -> list[str]:
+    """Lower-cased domain of every recipient in a mail-rule parameter.
+
+    Unified Audit Log forwarding parameters are not a single plain address.
+    They arrive as lists, as ';'-separated strings, with display names
+    ("Bob <bob@x.com>"), with an 'smtp:' prefix, in Exchange's bracketed
+    form ('"Bob" [SMTP:bob@x.com]'), and with trailing separators. Reading
+    only the last '@'-segment of the stringified value meant a rule
+    forwarding to both an external attacker and an internal colleague was
+    scored on whichever happened to be last, so
+    'attacker@evil;colleague@tenant' was not flagged external at all.
+    """
+    if value is None:
+        return []
+    raw_items = (
+        [str(v) for v in value]
+        if isinstance(value, (list, tuple, set))
+        else [str(value)]
+    )
+    domains: list[str] = []
+    for item in raw_items:
+        domains.extend(m.group(1).lower() for m in _ADDRESS.finditer(item))
+    return domains
+
+
+def has_external_recipient(value, tenant_domains: list[str]) -> bool:
+    """True if any recipient is outside the tenant.
+
+    An unparseable recipient counts as external. Returning False for a
+    destination we could not read would mean a forwarding rule we do not
+    understand is silently treated as internal — the safe default for a
+    detection is to surface it, not to suppress it.
+    """
+    if not tenant_domains:
+        return False
+    domains = recipient_domains(value)
+    if not domains:
+        return True
+    return any(d not in tenant_domains for d in domains)
+
 
 def detect_suspicious_mail_rules(audit_records: list[dict], tenant_domains: list[str] | None = None) -> list[dict]:
     """Flag inbox/transport rules that forward or redirect mail externally,
@@ -130,12 +210,24 @@ def detect_suspicious_mail_rules(audit_records: list[dict], tenant_domains: list
         if r.get("operation") not in _INBOX_RULE_OPS:
             continue
         params = r.get("parameters", {}) or {}
-        forward_to = params.get("ForwardTo") or params.get("RedirectTo") or params.get("ForwardAsAttachmentTo")
+        # Every forwarding parameter, not the first one that happens to be
+        # set. An `or` chain stopped at ForwardTo, so a rule with an internal
+        # ForwardTo and an external RedirectTo — an ordinary exfil pattern —
+        # was scored on the internal address alone and never flagged
+        # external. That is the same defect this module fixes *within* a
+        # recipient string, and it was still present *across* parameters.
+        forward_values = [
+            params.get(key)
+            for key in ("ForwardTo", "RedirectTo", "ForwardAsAttachmentTo")
+            if params.get(key)
+        ]
         delete_message = bool(params.get("DeleteMessage"))
 
-        if forward_to:
-            domain = str(forward_to).split("@")[-1].lower()
-            external = bool(tenant_domains) and domain not in tenant_domains
+        if forward_values:
+            # Any external recipient makes the whole rule external — a rule
+            # that forwards to an attacker *and* a colleague is still exfil.
+            external = has_external_recipient(forward_values, tenant_domains)
+            forward_to = "; ".join(str(v) for v in forward_values)
             findings.append({
                 "rule": "suspicious_mail_rule",
                 "severity": "high" if external or not tenant_domains else "medium",
@@ -187,6 +279,44 @@ def detect_risky_app_consent(audit_records: list[dict]) -> list[dict]:
     return findings
 
 
+# Per-record rules emit one finding per matching record, so raising the
+# document ceiling to 50,000 made an unbounded finding count possible: a
+# tenant with widespread legacy auth would serialise tens of thousands of
+# findings into a single response. Capping per (rule, subject) bounds it
+# while leaving every subject represented for every rule it triggered, so
+# which accounts get flagged is unchanged.
+MAX_FINDINGS_PER_RULE_SUBJECT = 50
+
+# A per-(rule, subject) cap alone does not bound the report: a tenant with
+# basic auth across 1,000 mailboxes still yields 1,000 x 50 legacy_auth
+# findings. This is the actual ceiling on response size.
+MAX_FINDINGS_TOTAL = 5_000
+
+
+def cap_findings(
+    findings: list[dict],
+    limit: int = MAX_FINDINGS_PER_RULE_SUBJECT,
+    total_limit: int = MAX_FINDINGS_TOTAL,
+) -> tuple[list[dict], int]:
+    """Returns (kept, dropped_count), preserving order.
+
+    Bounds repetition per (rule, subject) first, so every account stays
+    represented for every rule it triggered, then applies an overall ceiling
+    so a wide tenant cannot blow up the response.
+    """
+    kept: list[dict] = []
+    dropped = 0
+    seen: dict[tuple[str, str | None], int] = defaultdict(int)
+    for f in findings:
+        key = (f["rule"], f.get("subject"))
+        seen[key] += 1
+        if seen[key] <= limit and len(kept) < total_limit:
+            kept.append(f)
+        else:
+            dropped += 1
+    return kept, dropped
+
+
 def run_all_rules(signins: list[dict], audit_records: list[dict], tenant_domains: list[str] | None = None) -> list[dict]:
     findings: list[dict] = []
     findings += detect_impossible_travel(signins)
@@ -194,28 +324,59 @@ def run_all_rules(signins: list[dict], audit_records: list[dict], tenant_domains
     findings += detect_legacy_auth(signins)
     findings += detect_suspicious_mail_rules(audit_records, tenant_domains)
     findings += detect_risky_app_consent(audit_records)
+    # Assign ids here so the summary can cite the same ids the caller sees.
+    for f in findings:
+        f["id"] = finding_id(f["rule"], f["evidence"])
     return findings
 
 
 def summarize_triage(findings: list[dict]) -> dict:
     """Build the triage-question answers from a finding list, mirroring the
     Triage Assessment Module's fixed question set."""
-    compromised = sorted({f["subject"] for f in findings if f["subject"] and f["severity"] in ("high", "medium")})
+    # An account is only called out as likely compromised if it carries a
+    # high-severity finding, or corroboration from two different rules.
+    # Promoting any medium finding meant a single legacy-auth (POP/IMAP)
+    # sign-in was enough — common on real tenants, and badly over-reported.
+    rules_by_subject: dict[str, set[str]] = defaultdict(set)
+    high_severity_subjects: set[str] = set()
+    for f in findings:
+        subject = f.get("subject")
+        if not subject:
+            continue
+        rules_by_subject[subject].add(f["rule"])
+        if f["severity"] == "high":
+            high_severity_subjects.add(subject)
+
+    compromised = sorted(
+        s for s, rules in rules_by_subject.items()
+        if s in high_severity_subjects or len(rules) >= 2
+    )
 
     mail_findings = [f for f in findings if f["area"] == "Mail rules and forwarding"]
     signin_findings = [f for f in findings if f["area"] == "Authentication and sign-ins"]
     high_severity = [f for f in findings if f["severity"] == "high"]
 
     def basis(fs: list[dict]) -> list[str]:
-        return [f"{f['rule']}:{','.join(f['evidence'])}" for f in fs]
+        """Finding ids, so every answer can be joined back to the findings
+        list the caller was given."""
+        return [f["id"] for f in fs if "id" in f]
 
     answers = []
 
     if compromised:
+        # Only findings attributable to the named accounts. Citing every
+        # sign-in and mail finding meant this answer counted — and, once the
+        # basis carried real finding ids, directly cited — findings belonging
+        # to accounts it had just decided were *not* compromised.
+        compromised_set = set(compromised)
+        supporting = [
+            f for f in signin_findings + mail_findings
+            if f.get("subject") in compromised_set
+        ]
         answers.append({
             "question": "Which accounts are likely compromised?",
-            "answer": f"{', '.join(compromised)} — based on {len(signin_findings) + len(mail_findings)} supporting finding(s).",
-            "basis": basis(signin_findings + mail_findings),
+            "answer": f"{', '.join(compromised)} — based on {len(supporting)} supporting finding(s).",
+            "basis": basis(supporting),
         })
     else:
         answers.append({

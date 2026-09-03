@@ -178,3 +178,285 @@ class TestSummarizeTriage:
         answers = {a["question"]: a for a in summary["answers"]}
         assert "Yes" in answers["Is legal support recommended?"]["answer"]
         assert "Recommended" in answers["Is a full forensic investigation recommended?"]["answer"]
+
+
+# ---------------------------------------------------------------------------
+# Phase 0 regression tests — each of these fails on the pre-fix behaviour.
+# ---------------------------------------------------------------------------
+
+AT = "@"
+TENANT = "contoso" + ".onmicrosoft.com"
+EXTERNAL_DOMAIN = "totally-external-domain" + ".example"
+
+
+class TestImpossibleTravelFanOut:
+    def test_one_incident_yields_one_finding_not_a_combinatorial_fan_out(self):
+        """Ten sign-ins alternating between two countries is one incident to an
+        analyst. Comparing every pair produced 25 findings for it."""
+        events = []
+        for i in range(5):
+            events.append(signin(_id=f"us{i}", location_country="US",
+                                 timestamp=(NOW + timedelta(minutes=i * 6)).isoformat()))
+            events.append(signin(_id=f"ng{i}", location_country="NG",
+                                 timestamp=(NOW + timedelta(minutes=i * 6 + 1)).isoformat()))
+        findings = detect_impossible_travel(events)
+        assert len(findings) < 25
+        assert len(findings) == 9  # one per adjacent country change
+
+    def test_scales_linearly_not_quadratically(self):
+        events = [
+            signin(_id=f"e{i}", location_country="US" if i % 2 else "NG",
+                   timestamp=(NOW + timedelta(minutes=i)).isoformat())
+            for i in range(60)
+        ]
+        # Quadratic behaviour would put this near 1,800.
+        assert len(detect_impossible_travel(events)) <= 60
+
+
+class TestForwardToParsing:
+    def test_external_recipient_is_flagged_even_when_not_listed_last(self):
+        """The regression that mattered: a rule forwarding to an attacker AND a
+        colleague was scored on whichever address happened to be last."""
+        a = audit(_id="a1", operation="New-InboxRule", parameters={
+            "ForwardTo": "attacker" + AT + EXTERNAL_DOMAIN + ";colleague" + AT + TENANT
+        })
+        findings = detect_suspicious_mail_rules([a], tenant_domains=[TENANT])
+        assert findings[0]["severity"] == "high"
+        assert "(external domain)" in findings[0]["text"]
+
+    def test_display_name_form_internal_is_not_falsely_external(self):
+        a = audit(_id="a1", operation="New-InboxRule", parameters={
+            "ForwardTo": "Colleague <colleague" + AT + TENANT + ">"
+        })
+        findings = detect_suspicious_mail_rules([a], tenant_domains=[TENANT])
+        assert findings[0]["severity"] == "medium"
+        assert "(external domain)" not in findings[0]["text"]
+
+    def test_list_valued_and_smtp_prefixed_recipients(self):
+        a = audit(_id="a1", operation="New-InboxRule", parameters={
+            "ForwardTo": ["smtp:attacker" + AT + EXTERNAL_DOMAIN]
+        })
+        findings = detect_suspicious_mail_rules([a], tenant_domains=[TENANT])
+        assert findings[0]["severity"] == "high"
+
+    def test_all_internal_multi_recipient_stays_medium(self):
+        a = audit(_id="a1", operation="New-InboxRule", parameters={
+            "ForwardTo": "one" + AT + TENANT + ";two" + AT + TENANT
+        })
+        findings = detect_suspicious_mail_rules([a], tenant_domains=[TENANT])
+        assert findings[0]["severity"] == "medium"
+
+
+class TestCompromiseThreshold:
+    def test_lone_legacy_auth_signin_does_not_mark_account_compromised(self):
+        s = signin(_id="s1", user_principal_name="pop.user" + AT + TENANT,
+                   client_app="IMAP4", auth_protocol="basic")
+        summary = summarize_triage(run_all_rules([s], []))
+        assert summary["likely_compromised_accounts"] == []
+
+    def test_high_severity_finding_alone_is_enough(self):
+        s = signin(_id="s1", user_principal_name="victim" + AT + TENANT, risk_level="high")
+        summary = summarize_triage(run_all_rules([s], []))
+        assert "victim" + AT + TENANT in summary["likely_compromised_accounts"]
+
+    def test_two_distinct_medium_rules_corroborate(self):
+        s = signin(_id="s1", user_principal_name="victim" + AT + TENANT,
+                   client_app="IMAP4", auth_protocol="basic")
+        a = audit(_id="a1", operation="New-InboxRule",
+                  user_principal_name="victim" + AT + TENANT,
+                  parameters={"ForwardTo": "colleague" + AT + TENANT})
+        summary = summarize_triage(run_all_rules([s], [a], tenant_domains=[TENANT]))
+        assert "victim" + AT + TENANT in summary["likely_compromised_accounts"]
+
+
+class TestTimestampNormalisation:
+    def test_mixed_naive_and_aware_timestamps_do_not_raise(self):
+        a = signin(_id="a1", location_country="US", timestamp="2026-08-13T12:00:00+00:00")
+        b = signin(_id="a2", location_country="NG", timestamp="2026-08-13T12:25:00")
+        findings = detect_impossible_travel([a, b])  # previously TypeError
+        assert len(findings) == 1
+
+
+class TestFindingIds:
+    def test_answers_cite_ids_that_exist_in_the_findings_list(self):
+        s1 = signin(_id="s1", user_principal_name="victim" + AT + TENANT, location_country="US")
+        s2 = signin(_id="s2", user_principal_name="victim" + AT + TENANT,
+                    location_country="NG", risk_level="high",
+                    timestamp=(NOW + timedelta(minutes=20)).isoformat())
+        findings = run_all_rules([s1, s2], [], tenant_domains=[TENANT])
+        summary = summarize_triage(findings)
+        known = {f["id"] for f in findings}
+        cited = {b for a in summary["answers"] for b in a["basis"]}
+        assert cited, "answers cited nothing"
+        assert cited <= known, f"answers cite unknown ids: {cited - known}"
+
+    def test_ids_are_stable_across_runs_and_ordering(self):
+        s1 = signin(_id="s1", location_country="US")
+        s2 = signin(_id="s2", location_country="NG",
+                    timestamp=(NOW + timedelta(minutes=20)).isoformat())
+        first = {f["id"] for f in run_all_rules([s1, s2], [])}
+        # An unrelated extra finding must not renumber the originals.
+        extra = audit(_id="a9", operation="Set-InboxRule", parameters={"DeleteMessage": True})
+        second = {f["id"] for f in run_all_rules([s1, s2], [extra])}
+        assert first <= second
+
+
+# ---------------------------------------------------------------------------
+# Defects found while reviewing the Phase 0 changes themselves.
+# ---------------------------------------------------------------------------
+
+class TestChainIsNotBrokenByUnusableEvents:
+    def test_unknown_country_between_two_known_ones_does_not_suppress_detection(self):
+        """Switching to adjacent-pair comparison introduced this: an
+        unplaceable sign-in sitting between two known ones broke the pair and
+        silently suppressed an obviously impossible journey."""
+        a = signin(_id="a", location_country="US", timestamp=NOW.isoformat())
+        mid = signin(_id="b", location_country="ZZ",
+                     timestamp=(NOW + timedelta(minutes=12)).isoformat())
+        c = signin(_id="c", location_country="NG",
+                   timestamp=(NOW + timedelta(minutes=25)).isoformat())
+        findings = detect_impossible_travel([a, mid, c])
+        assert len(findings) == 1, "US -> NG in 25 minutes must still be flagged"
+        assert set(findings[0]["evidence"]) == {"a", "c"}
+
+    def test_plausible_chain_still_produces_nothing(self):
+        """Guards the triangle-inequality property that makes adjacent-pair
+        comparison sufficient: if every leg is plausible, so is the span."""
+        events = [
+            signin(_id="1", location_country="US", timestamp=NOW.isoformat()),
+            signin(_id="2", location_country="GB",
+                   timestamp=(NOW + timedelta(hours=20)).isoformat()),
+            signin(_id="3", location_country="NG",
+                   timestamp=(NOW + timedelta(hours=40)).isoformat()),
+        ]
+        assert detect_impossible_travel(events) == []
+
+
+class TestAnswersOnlyCiteRelevantAccounts:
+    def test_compromise_answer_does_not_cite_other_accounts_findings(self):
+        victim = "victim" + AT + TENANT
+        bystander = "bystander" + AT + TENANT
+        events = [
+            signin(_id="v1", user_principal_name=victim, location_country="US"),
+            signin(_id="v2", user_principal_name=victim, location_country="NG",
+                   risk_level="high", timestamp=(NOW + timedelta(minutes=20)).isoformat()),
+            # Not compromised under the corroboration rule.
+            signin(_id="b1", user_principal_name=bystander,
+                   client_app="IMAP4", auth_protocol="basic"),
+        ]
+        findings = run_all_rules(events, [], tenant_domains=[TENANT])
+        summary = summarize_triage(findings)
+        subject_of = {f["id"]: f["subject"] for f in findings}
+
+        assert summary["likely_compromised_accounts"] == [victim]
+        q1 = summary["answers"][0]
+        cited_subjects = {subject_of[b] for b in q1["basis"]}
+        assert cited_subjects == {victim}, (
+            f"answer about {victim} cites findings for {cited_subjects - {victim}}"
+        )
+        assert "based on 2 supporting finding(s)" in q1["answer"]
+
+
+# ---------------------------------------------------------------------------
+# Defects found by the pre-PR review.
+# ---------------------------------------------------------------------------
+
+class TestRecipientParsingIsRobust:
+    """email.utils.getaddresses returns [('', '')] — no address at all — for
+    a trailing separator and for Exchange's bracketed form. That produced an
+    empty domain list, which scored genuine exfil as internal."""
+
+    def _forward(self, value):
+        a = audit(_id="a1", operation="New-InboxRule", parameters={"ForwardTo": value})
+        return detect_suspicious_mail_rules([a], tenant_domains=[TENANT])[0]
+
+    def test_trailing_separator_still_detects_external(self):
+        f = self._forward("attacker" + AT + EXTERNAL_DOMAIN + ";")
+        assert f["severity"] == "high"
+        assert "(external domain)" in f["text"]
+
+    def test_exchange_bracketed_form_still_detects_external(self):
+        f = self._forward('"Attacker" [SMTP:attacker' + AT + EXTERNAL_DOMAIN + "]")
+        assert f["severity"] == "high"
+        assert "(external domain)" in f["text"]
+
+    def test_unparseable_recipient_is_treated_as_external_not_internal(self):
+        """Fail toward surfacing: a destination we cannot read must not be
+        silently assumed to be inside the tenant."""
+        f = self._forward("Bob Smith (no address here)")
+        assert f["severity"] == "high"
+
+    def test_internal_recipients_are_still_not_external(self):
+        for value in ("colleague" + AT + TENANT,
+                      "Colleague <colleague" + AT + TENANT + ">",
+                      "colleague" + AT + TENANT + ";"):
+            f = self._forward(value)
+            assert f["severity"] == "medium", value
+            assert "(external domain)" not in f["text"]
+
+
+class TestFindingCap:
+    def test_repeated_findings_are_capped_without_changing_detection(self):
+        from app.rules import MAX_FINDINGS_PER_RULE_SUBJECT, cap_findings
+        user = "noisy" + AT + TENANT
+        signins = [
+            signin(_id=f"L{i}", user_principal_name=user,
+                   client_app="IMAP4", auth_protocol="basic")
+            for i in range(MAX_FINDINGS_PER_RULE_SUBJECT + 25)
+        ]
+        signins.append(signin(_id="R1", user_principal_name=user, risk_level="high"))
+        findings = run_all_rules(signins, [])
+        kept, dropped = cap_findings(findings)
+
+        assert dropped == 25
+        assert len(kept) == MAX_FINDINGS_PER_RULE_SUBJECT + 1
+        # The high-severity rule survives, so the verdict is unchanged.
+        assert (summarize_triage(kept)["likely_compromised_accounts"]
+                == summarize_triage(findings)["likely_compromised_accounts"])
+        assert {f["rule"] for f in kept} == {f["rule"] for f in findings}
+
+
+class TestAllForwardingParametersAreChecked:
+    def test_external_redirect_is_caught_when_forward_is_internal(self):
+        """An `or` chain stopped at ForwardTo, so a rule whose ForwardTo is a
+        colleague and whose RedirectTo is the attacker was scored on the
+        colleague alone — the same defect as reading one recipient out of a
+        multi-recipient string, one level up."""
+        a = audit(_id="a1", operation="New-InboxRule", parameters={
+            "ForwardTo": "colleague" + AT + TENANT,
+            "RedirectTo": "attacker" + AT + EXTERNAL_DOMAIN,
+        })
+        f = detect_suspicious_mail_rules([a], tenant_domains=[TENANT])[0]
+        assert f["severity"] == "high"
+        assert "(external domain)" in f["text"]
+
+    def test_forward_as_attachment_is_checked(self):
+        a = audit(_id="a1", operation="New-InboxRule", parameters={
+            "ForwardAsAttachmentTo": "attacker" + AT + EXTERNAL_DOMAIN,
+        })
+        assert detect_suspicious_mail_rules([a], tenant_domains=[TENANT])[0]["severity"] == "high"
+
+    def test_all_internal_across_parameters_stays_medium(self):
+        a = audit(_id="a1", operation="New-InboxRule", parameters={
+            "ForwardTo": "one" + AT + TENANT,
+            "RedirectTo": "two" + AT + TENANT,
+        })
+        assert detect_suspicious_mail_rules([a], tenant_domains=[TENANT])[0]["severity"] == "medium"
+
+
+class TestGlobalFindingCap:
+    def test_wide_tenant_is_bounded_not_just_per_account(self):
+        """The per-(rule, subject) cap alone does not bound the report: many
+        accounts each contributing the per-account maximum still add up."""
+        from app.rules import MAX_FINDINGS_TOTAL, cap_findings
+        findings = [
+            {"rule": "legacy_auth", "severity": "medium",
+             "area": "Authentication and sign-ins", "text": "t",
+             "evidence": [f"e{u}-{i}"], "subject": f"user{u}" + AT + TENANT,
+             "id": f"F-{u}-{i}"}
+            for u in range(400) for i in range(30)
+        ]
+        kept, dropped = cap_findings(findings)
+        assert len(findings) == 12000
+        assert len(kept) == MAX_FINDINGS_TOTAL
+        assert dropped == 12000 - MAX_FINDINGS_TOTAL
