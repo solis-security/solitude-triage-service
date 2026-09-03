@@ -3,6 +3,15 @@ WORKDIR /app
 
 RUN adduser --disabled-password --gecos "" appuser
 
+# Any .crt dropped into certs/ is trusted by the build. Empty by default, so
+# this is a no-op on an ordinary network; on one that intercepts TLS it is
+# what lets pip reach PyPI at all. See certs/README.md.
+COPY certs/ /usr/local/share/ca-certificates/
+RUN update-ca-certificates
+ENV PIP_CERT=/etc/ssl/certs/ca-certificates.crt \
+    REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt \
+    SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 

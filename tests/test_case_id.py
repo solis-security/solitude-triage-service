@@ -72,7 +72,17 @@ ROUTABLE = ["*", "SR-2026-0501,acme-001", "sr-*", "a" * 65]
 
 @pytest.mark.parametrize("case_id", ROUTABLE)
 @pytest.mark.parametrize(
-    "path", ["/triage/{}", "/triage/{}/findings", "/logs/{}/signin", "/logs/{}/audit"]
+    "path",
+    [
+        "/triage/{}",
+        "/triage/{}/findings",
+        # Added on main after this fix was written: it feeds the AI analysis
+        # engine, so a widened query here would put other customers' records
+        # into a model prompt.
+        "/triage/{}/analysis-input",
+        "/logs/{}/signin",
+        "/logs/{}/audit",
+    ],
 )
 def test_routes_reject_dangerous_case_ids(case_id, path):
     """422 before any storage call. These assertions hold with no Elasticsearch
