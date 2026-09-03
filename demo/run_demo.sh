@@ -42,8 +42,21 @@ for signin_file in "$SAMPLE_DIR"/*-signin.jsonl; do
 done
 
 echo "== Provisioning Kibana dashboards =="
-python3 -m pip install --quiet requests
-python3 "$REPO_ROOT/kibana/provision_dashboards.py" --kibana-url "$KIBANA_URL"
+# Use a throwaway venv rather than installing into the system interpreter.
+# `python3 -m pip install requests` fails outright on a stock macOS Python
+# (Command Line Tools), which has no requests and cannot install into its own
+# site-packages -- and with `set -e` that killed the demo one step from done.
+DEMO_VENV="$REPO_ROOT/.venv-demo"
+if [ ! -x "$DEMO_VENV/bin/python" ]; then
+  echo "  creating $DEMO_VENV"
+  python3 -m venv "$DEMO_VENV"
+fi
+if ! "$DEMO_VENV/bin/python" -c "import requests" 2>/dev/null; then
+  # On a TLS-intercepting network, export REQUESTS_CA_BUNDLE (or PIP_CERT)
+  # to your proxy's root CA before running this.
+  "$DEMO_VENV/bin/python" -m pip install --quiet --disable-pip-version-check requests
+fi
+"$DEMO_VENV/bin/python" "$REPO_ROOT/kibana/provision_dashboards.py" --kibana-url "$KIBANA_URL"
 
 echo
 echo "Done."
